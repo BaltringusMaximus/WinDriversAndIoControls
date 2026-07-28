@@ -1,0 +1,15 @@
+windbg commands:
+
+.cls = clear terminal
+
+bm /module/!/function/ = bm driver4!DriverEntry = set breakpoint on a module'function
+
+bl = list breakpoints
+
+g = go
+
+p = moves to the next line of code
+
+k = see the callstack
+
+ed nt!Kd_DEFAULT_Mask 0xffffffff = filter mask to print stuff in the command
