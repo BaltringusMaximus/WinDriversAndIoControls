@@ -492,7 +492,7 @@ NonPnpDeviceAdd(
     //&attributes doesn't change shi, the problem is that  WDF_WORKITEM_CONFIG workitemConfig;
     //The doc explains this. STATUS_WDF_INCOMPATIBLE_EXECUTION_LEVEL means
     //that AutomaticSerialization in your WDF_WORKITEM_CONFIG is set to TRUE
-    //    but the parent object’s execution level is not set to passive.
+    //    but the parent objectÂ’s execution level is not set to passive.
     //   WDF_WORKITEM_CONFIG_INIT, by default, sets AutomaticSerialzation to TRUE.
     //(https://community.osr.com/t/wdfworkitemcreate-error-status-wdf-incompatible-execution-level/27441/4)
 
