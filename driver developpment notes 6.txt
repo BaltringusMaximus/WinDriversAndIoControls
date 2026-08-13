@@ -1,0 +1,193 @@
+WdfDeviceCreate is pnp only
+
+WdfDriverCreate will fail with STATUS_INVALID_PARAMETER when given WdfDriverInitNonPnpDriver with a non-NULL EvtDriverDeviceAdd
+
+in non pnp WDF drivers, there must be an unload routine as well as an event clean up routine : 
+EVT_WDF_DRIVER_UNLOAD DriverUnload;
+EVT_WDF_DEVICE_CONTEXT_CLEANUP NonPnpEvtDriverContextCleanup;
+and :
+WDF_OBJECT_ATTRIBUTES          attributes;
+must be declared in driver entry
+and:
+WdfDriverCreate(DriverObject, RegistryPath, WDF_NO_OBJECT_ATTRIBUTES, &config, WDF_NO_HANDLE); WONT WORK , you need to input :
+WdfDriverCreate(DriverObject, RegistryPath, &attributes, &config, WDF_NO_HANDLE);
+and before that :
+WDF_OBJECT_ATTRIBUTES_INIT(&attributes);
+attributes.EvtCleanupCallback = NonPnpEvtDriverContextCleanup;
+ WDF_DRIVER_CONFIG_INIT(&config,
+     NULL
+ );
+
+
+ config.DriverInitFlags = WdfDriverInitNonPnpDriver;
+ config.EvtDriverUnload = DriverUnload;
+
+second member of wdf driver config must be NULL
+
+used WdfDeviceInitSetIoTypeEx(DeviceInit, &IoTypeConfig); instead of WdfDeviceInitSetIoType(DeviceInit, WdfDeviceIoBuffered); idk if it worked but returned no error i guess
+
+INITIALLY try to capture packets using the WFP /!\ you can map netbufferlists at L2 level. 
+WFP supports NON PNP drivers
+
+toggling Monitor mode and actually seeing raw packets in native wifi requires:
+-filterclass = ms_medium_converter_128 (setting the driver below native wifi) so two drivers required, one for ethernet at compression and one at ms_medium_converter_128 ( the second driver in case the frames aren't properly set with the DOT11_RECV_FLAG_RAW_PACKET flag by the miniport and thus translated by native wifi)
+-sending OID_DOT_11_CURRENT_OPERATION_MODE = DOT11_OPERATION_MODE_NETWORK_MONITOR
+-setting packet filters :OID_GEN_CURRENT_PACKET_FILTER.
+
+    NDIS_PACKET_TYPE_PROMISCUOUS
+
+    NDIS_PACKET_TYPE_802_11_RAW_DATA
+
+    NDIS_PACKET_TYPE_802_11_PROMISCUOUS_MGMT
+
+    NDIS_PACKET_TYPE_802_11_RAW_MGMT
+
+    NDIS_PACKET_TYPE_802_11_PROMISCUOUS_CTRL
+-checking if recieved packets are correctly flagged in the NET_BUFFER_LIST.NetBufferListInfo where out of band data is stored.it is accessed using NET_BUFFER_LIST_INFO macro. Here, the  DOT11_EXTSTA_RECV_CONTEXT structure should contain a uRecieveFlag = DOT11_RECV_FLAG_RAW_PACKET. this structure contains mediaspecific info where radiotap-like headers can be retrieved.
+source: MSDN , https://community.osr.com/t/capturing-raw-native-802-11-packets-from-filter-driver/37809 , https://community.osr.com/t/ndis-6-802-11-mac-header/32477 , https://community.osr.com/t/802-11-and-ethernet-traffic-capture-and-send-in-a-single-ndis-lwf/53093 , https://community.osr.com/t/injecting-on-wireless-adapter-causes-kmode-exception-not-handled/57178/2
+
+in WDI based drivers, netmon isn't supported but you can set filters WDI_PACKET_FILTER_TYPE to   WDI_PACKET_FILTER_802_11_RAW_DATA,
+  WDI_PACKET_FILTER_802_11_DIRECTED_MGMT,
+  WDI_PACKET_FILTER_802_11_BROADCAST_MGMT,
+  WDI_PACKET_FILTER_802_11_MULTICAST_MGMT,
+  WDI_PACKET_FILTER_802_11_ALL_MULTICAST_MGMT,
+  WDI_PACKET_FILTER_802_11_PROMISCUOUS_MGMT,
+  WDI_PACKET_FILTER_802_11_RAW_MGMT,
+  WDI_PACKET_FILTER_802_11_DIRECTED_CTRL,
+  WDI_PACKET_FILTER_802_11_BROADCAST_CTRL,
+  WDI_PACKET_FILTER_802_11_PROMISCUOUS_CTRL,
+  WDI_PACKET_FILTER_ALL
+etc... to get raw 802.11 frames (if supported by the NIC) and there's nothing else to change in the filter driver's code to indicate the packets.
+
+in NDIS, only driver entry, filter attach, filter detach, filter pause and filter restart are mandatory, try implementing them only first.
+
+On how to send packets:
+
+    When your driver starts (DriverEntry), or when your filter attaches to a miniport (FilterAttach), allocate a NET_BUFFER_LIST (NBL) pool with NdisAllocateNetBufferListPool. For typical usage, you'll want to get one NET_BUFFER (NB) automatically with each NBL, so set fAllocateNetBuffer=TRUE. If you want NDIS to allocate the data payload buffers for you, also give a non-zero DataSize. If you already have the packet payload in some other buffer, you can transmit faster by pointing the NB at the existing MDL, but this is also more complex to code up.
+    To send a packet, allocate a new NBL from NdisAllocateNetBufferAndNetBufferList. Put your FilterModuleHandle into NBL->SourceHandle. Assign NB->DataLength and copy in the data. Call NdisFSendNetBufferLists on your new NBL. Do not touch the NBL until it's returned back to you.
+    Eventually, NDIS will return the NBL back to you via FilterSendNetBufferListsComplete. Note that all NBLs come through there in one jumbled linked list -- both your own NBLs, as well as any NBLs you just passed through from above. So you have to slice the linked list based on NBL->SourceHandle: if the SourceHandle is yours, take the NBL out of the stream and free it via NdisFreeNetBufferList. Otherwise, if the NBL is not yours, continue propagating it along by calling NdisFSendNetBufferListsComplete.
+    Do not allow FilterPause to complete until all the NBLs you originated have been returned to you. You can do this any way you want, but the usual approach is to add some refcounting to the send and sendcomplete paths. You are not required to worry about any NBLs that you didn't create.
+
+When you're creating NBLs, you can use !ndiskd.nbl to double-check your work. It can detect a variety of errors. There's a likely problem with the NBL if ndiskd reports any field in red text.
+source : https://stackoverflow.com/questions/63116750/how-can-i-send-arbitrary-packets-with-a-ndis-filter-driver
+
+NDIS_TEST_SEND_AT_DISPATCH_LEVEL, FILTER_ACQUIRE_LOCK (filter.h) , FILTER_RELEASE_LOCK (filter.h) are very important to use when invoking NdisSend/ReceiveNetBufferList(Complete) and are related to IRQLs /!\
+Dealing with IRQL is essentially not calling a function that requires a low IRQL when in a higher IRQL
+e.g "What you should do is just to structure your code in such way that a function that MAY be called at IRQL > PASSIVE_LEVEL never does anything that is not allowed at IRQL > PASSIVE_LEVEL; a function that MAY be called at DISPATCH_LEVEL never does anything that is allowed only at IRQL < DISPATCH_LEVEL;etc…" 
+source: https://community.osr.com/t/how-often-should-we-check-the-irql-what-is-the-best-practice/57182/2
+fortunately enough, most functions used by NDIS for my project run at IRQL <= Dispatch Level, that includes https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/nblapi/nf-nblapi-ndiscopyfromnetbuffertonetbuffer , ndisCopyfromnetbuffertonetbuffer, ndisclonenetbufferlist etc...
+
+worthwhile code : https://github.com/microsoft/ndis-driver-library
+
+relevant wifi binding issues : 
+https://community.osr.com/t/how-can-ndis-filter-driver-inject-wireless-packets/44520/3
+
+VERY interesting stackoverflow post about filters in the stack and how to handle upper layers filters when enabling promiscuous mode https://stackoverflow.com/questions/18257048/ndis-filter-driver-filterreceivenetbufferlists-handler-isnt-called , https://pastebin.com/ZMzuBpF8
+
+If a WFP driver must apply to multiple to multiple layer (e.g inbound, ooutbound), registercallout, calloutadd, filteradd must be called several times (one per layer) see https://learn.microsoft.com/en-us/windows-hardware/drivers/network/registering-callouts-with-the-filter-engine. there should be one filter function per layer.
+NTSTATUS CalloutAdd(void * CALLOUT_GUID, void Applicable_layer) {
+    addCalloutId = 0;
+
+    FWPM_CALLOUT callout = {
+      .flags = 0,                                // None
+      .displayData.name = L"MaliciousCalloutName",
+      .displayData.description = L"MaliciousCalloutDescription",
+      .calloutKey = CALLOUT_GUID,                     // The GUID that uniquely identifies the callout (must match the registered FWPS_CALLOUT GUID)
+      .applicableLayer = applicable_layer
+    };
+
+    return FwpmCalloutAdd(engineHandle, &callout, NULL, &addCalloutId);
+}
+
+Interesting article stating how NBL are structured : https://codemachine.com/articles/ndis6_net_buffer_lists.html
+
+to handle NBLs asynchronously: 
+1/ receive NBL;
+2/ clone NBL synchronously;
+3/ put clone NBL address in a linked list of cloned NBLs
+(4/ upon IO request, process an NBL, free it afterwards (using NdisFreeCloneNetBufferList))
+5/ once a list of NBLs reaches 10 NBLs or if 1 sec is elapsed, then process the list and free the clones
+
+IGNORE previous NBL handling:
+COPYING MUST BE DONE SYNCHRONOUSLY, it shouldn't take so long to do so performance wise it should be alright.
+TO DO:
+1/Allocate a non paged buffer in Kernel mode: done
+	1.5/make a memory management system to handle packets memory, make a locking/freeing method or something to count the byte offset at which my keernel can copy the packets without overwriting on previous memory.
+2/copy NBL's MDLs in the buffer
+	2.5/ complete copying before sending the notification to userspace to avoid reading on memory being written on
+3/notify the user mode application using inverted call method (cf OSR developper's forum)
+	3.1/create WDF queue to push the inverted call IOs : done
+	3.2/handle completions of IO codes kernel + user
+4/send an IO READ control code to the driver to read the buffer and pass the packets upstairs
+5/erase packet from buffer/ free memory space.
+
+packets copied to the buffer should contain a header indicating: 
+length of the packet, offset relative to the beginning of the block, length of the following block of zero
+blocks of zero should contain a header with their length too
+when copying on a free block, the header should declare where the block ends and how many zeros before the next variable (important in case the allocated memory needed is shorter than the zero block returned by the alloxator
+
+On Oid requests :
+NDIS itself calls the FilterOidRequestComplete when NDIS_STATUS_PENDING is returned. However, on the MSDN sample filter driver,
+OID requests are first cloned, then passed down (NdisFOidRequest). The FilterOidRequest function assignes the status to the Original Oid Request and then calls NdisFOidRequestComplete. If a cloned Oid Request returns NDIS_STATUS_PENDING, the FilterOidRequest callback will be auto called by NDIS to assign the status to the original Oid Request and call NdisFOidRequestComplete
+However, since OID Requests are cloned and since NDIS doesn't call FilterOidRequest if the status isn't pending, the filter driver calls the FilterOidRequest manually to complete the original OID request.
+
+intersting post about OIDs from user mode : https://stackoverflow.com/questions/10744452/ndis-oid-query-from-user-mode
+
+on the sample, check out "FilterDoInternalOidRequest"
+
+On how to handle kernel memory buffer and user mode reading requests:
+we have three buffers:
+One read only
+One write only
+One pending
+A clock ticks and assign which is what :	[0,1,2] = 0 read only, 1 write only, 2 pending
+						[1,0,2] = 2 read only, 1 write only, 0 pending
+when writing an NBL into a buffer: the driver checks which buffer is write only and copies there, it indicates that the buffer write only is busy, and if the clocks ticks again, it will check if the buffer is being used.
+if the buffer is being used, the buffer will remain write only, and the read only buffer will switch to the pending buffer instead.
+If both buffers are busy, no change will be made
+if one buffer is full for writing, the pending buffer is set to write only and used.
+
+1/allocate pool from non paged memory (say 16MB)
+2/split the pool into many buffers (say 32 sub buffers)
+3/map large buffer to user space.
+4/send 20 IOcontrols, each containing an offset to the large buffer representing a segment of the buffer
+5/upon receiving (or transmitting) a packet, the FilterReceiveNetBufferList (or FilterSendNetBufferList) retrieves an IO control from the queue, copies the packet to the related segment, completes the IO control code (effectively removing it from the queue and making sure the memory described by it safe from being overwritten)
+if the queue is empty, return the ownership of the packet without blocking it. alternatively, it could copy up to ten packets to the same segment and then issue the completion to usermode, to process packets in batch. (the overall idea is that of the inverted call described on OSR forums)
+INSTEAD of using fixed size batches, fill the buffer completely before completing the IO request. as long as there is free space in the buffer, copy the net buffer list inside the buffer. If there is not enough room in it, then complete the request, retrieve a new request and copy the packet inside the new segment. this comes from the idea that if there is no more pending request, I might as well just hang onto the last IO request until the buffer is filled or there is a new pending IO request to be retrieved in one of the queue. this is an improvement from the fixed size packet batch? it avoids some packet loss.
+so yeah, the intial Idea was to keep fixed size batches, kept losing some packets, so instead tried to hold onto the last pending io control code until another one was available and try to copy the packet in its described buffer segment and then start dropping packets if the LAST segment was full.
+Instead, I might as well just stop using fixed size and start holding onto all of the IO control codes as long as the segment isn't full.
+6/whenever user space app receives the completion routine, it issues a read request to the segment. this segment would be "owned" by the user space app in that it would be impossible to be used by the packet copying routine in the driver (the segment has been retrieved from the Queue and completed)
+7/ when the user app is done reading, it issues the IO control code describing the segment back to the driver, returning ownership of the segment to the driver, so that it can be reused.
+The goal is to run the NBL copying synchronously, and then let the user app read it asynchronously. the Inverted call is said to be rather quick, and it avoids allocating memory per packet and doing the reading synchronously.
+The goal is also to enforce strict ownership rules in order for the driver not read and write a memory block at the same time and prevent a bug check. it should be manual locking free (wdf queue locking is done by the framework)
+every routine called would be able to run at IRQL <= dispatch level (the driver is based on the MSDN filter driver sample, and the red teams tactics WFP callout driver).
+
+THE QUEUE MUST BE SEQUENTIAL (    WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE(&ioQueueConfig,
+        WdfIoQueueDispatchSequential); already implemented)
+turns out the queue needs not be sequential, all queues are actually thread safe. (https://community.osr.com/t/are-wdfqueues-thread-safe/45789)
+ sequential queues are also more tedious to set up, as they need a default IO evt function and other event functions 
+( ioQueueConfig.EvtIoDeviceControl = FileEvtIoDeviceControl2;
+//    ioQueueConfig.EvtIoDefault = FileEvtIoDefault;)
+
+basically the difference is that in manual queues, the request is *ONLY* retrieved manually, by calling WdfIoQueueRetrieveNextRequest.
+check out: https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdfio/ne-wdfio-_wdf_io_queue_dispatch_type
+;
+also, make sure to use WDF_IO_QUEUE_CONFIG_INIT_DEFAULT_QUEUE only on ONE queue, otherwise it wont work. this should be the IO queue that receives IO control codes from user mode and dispatches them to the evt io routine. When using non manual dispatch method, the framework will automatically pop the next request and deliver it to the driver, keeping it pending as long as you don't complete it. this is absolutely not what we want here.
+on manual queues, you need not to have a default routine or an evt io control routine described in the ioQueueConfig initialized by WDF_IO_QUEUE_CONFIG_INIT. 
+
+On how to complete IO control codes with an output buffers: https://stackoverflow.com/questions/41429684/deviceiocontrol-is-totally-not-working-systembuffer-empty-on-return
+"You need to call WdfRequestCompleteWithInformation "
+On accessing kernel memory from user space and vice versa : https://stackoverflow.com/questions/29938573/accessing-kernel-memory-from-user-mode-windows
+
+worthwhile example of how to use WdfDeviceWdmGetDeviceObject to convert WDM device object to WDF device for FwpsCalloutRegister:
+https://joyasystems.com/sample-code/Windows%20Driver%20Samples/Windows%20Filtering%20Platform%20Traffic%20Inspection%20Sample/C%2B%2B/sys/TL_drv.c
+
+accessing kernel memory from user space: https://stackoverflow.com/questions/29938573/accessing-kernel-memory-from-user-mode-windows
+
+Alright, keep in mind that
+"
+The routine returns a user address that is valid in the context of the process in which the driver is running. For example, if a 64-bit driver is running in the context of a 32-bit application, the buffer is mapped to an address in the 32-bit address range of the application.
+"
+So: what does it mean really? valid in the CONTEXT of the process: when calling this function, the returned value will be accessible by the caller user application ONLY if MmMapLockedPagesSpecifyCache is called while handling the IO control that would recceive the virtual address as an output.
+I don't think that's the proper explanation and I can't quite wrap my head around why this would be, but when you call this function from within the io handler routine when handling the said io control, the MmMap... will map the kernel buffer described by the mdl to a virtual address within the virtual address space of the calling user app.
+Very important stuff.
