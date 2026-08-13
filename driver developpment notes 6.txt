@@ -191,3 +191,4 @@ The routine returns a user address that is valid in the context of the process i
 So: what does it mean really? valid in the CONTEXT of the process: when calling this function, the returned value will be accessible by the caller user application ONLY if MmMapLockedPagesSpecifyCache is called while handling the IO control that would recceive the virtual address as an output.
 I don't think that's the proper explanation and I can't quite wrap my head around why this would be, but when you call this function from within the io handler routine when handling the said io control, the MmMap... will map the kernel buffer described by the mdl to a virtual address within the virtual address space of the calling user app.
 Very important stuff.
+TO DO: wrap the entire stuff in a try except, as per the MSDN documentation.
