@@ -1,6 +1,7 @@
 // NOTE: 
 // lengthBufferContiguousMemory is for total size of the allocated buffer for copying packet (here, it's 65536*50 packets * 10 segment per queue * 10 queues * 2 buffers (inbound and outbound) 
 // segmentTotalMemory is for the size of each segment of the buffer (here, it's 50*65536)
+// numberOfSegment will therefore be 10 segments per queue per direction (inbound or outbound) therefore 10 io control code * 10 queues * 2 directions = 200 :O
 
 
 
@@ -63,8 +64,15 @@ WDFMEMORY contiguousMemoryForPacket = NULL;
 VOID* pBufferContiguousMemory = NULL;
 MDL* pMdlBufferContiguousMemory = NULL;
 //test value for setting up the queues
+// 
 //#define lengthBufferContiguousMemory 500000
-#define lengthBufferContiguousMemory 655360000
+#define lengthBufferContiguousMemory 655360000 // that's a lot :/
+//#define segmentTotalMemory  393216000
+#define segmentTotalMemory  3276800
+#define numberOfSegment 200
+
+
+int remainingMemory = segmentTotalMemory;
 VOID* pStartAddressOfMappedPages = NULL;
 VOID** pAddressValueStartAddressOfMappedPages = &pStartAddressOfMappedPages;
 INT intByteOffsetFromContiguousMemory = 0;
@@ -134,9 +142,7 @@ WDFQUEUE                            queueIoInverted_8;
 WDFQUEUE                            queueIoInverted_9;
 WDFQUEUE                            queueIoInverted_10;
 WDFQUEUE                            queueIoPurgeEvent;
-//#define segmentTotalMemory  393216000
-#define segmentTotalMemory  3276800
-int remainingMemory = segmentTotalMemory;
+
 
 
 NTSTATUS
