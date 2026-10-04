@@ -814,7 +814,7 @@ DWORD WINAPI CompletionPortThread_4(LPVOID PortHandle)
     BOOL status = FALSE;
 
 
-    while (bStopSending) {
+    while (bStopSending == FALSE) {
         overlapped = NULL;
         memset(&overlapped2, 0, sizeof(OVERLAPPED));
         BOOL worked = GetQueuedCompletionStatus(PortHandle,                // Completion port handle
